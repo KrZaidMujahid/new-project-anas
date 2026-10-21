@@ -1,0 +1,8 @@
+{
+  "name": "InteractivePhyscsLab_by_anas",
+  "description": "taken from anas\n",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
