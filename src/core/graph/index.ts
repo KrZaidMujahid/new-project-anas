@@ -4,4 +4,10 @@
  */
 
 export * from './types';
-export { validateSampleOptions, sampleFunction } from './sampler';
+export { validateSampleOptions, sampleFunction, detectDiscontinuity } from './sampler';
+export type {
+  NormalizedAdaptiveConfig,
+  NormalizedSampleConfig,
+  DiscontinuityContext,
+  DiscontinuityCheckResult,
+} from './sampler';

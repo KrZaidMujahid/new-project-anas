@@ -10,7 +10,7 @@
  * - Strict absence of NaN and Infinity in drawable points
  */
 
-import { sampleFunction, SamplerValidationError } from '../../src/core/graph';
+import { sampleFunction, SamplerValidationError, detectDiscontinuity } from '../../src/core/graph';
 import { compileExpression } from '../../src/core/math';
 
 let totalTests = 0;
@@ -278,6 +278,288 @@ console.log('Test Suite 8: Evaluation Budget Enforcement');
 
   assert(resBudget.evaluationsCount === 100, 'Evaluated exactly to budget');
   assert(!resBudget.budgetExhausted, 'Budget was sufficient');
+}
+
+// 9. Adaptive Sampling Fundamentals
+console.log('Test Suite 9: Adaptive Sampling Fundamentals');
+{
+  // Linear function y = 2*x + 1: Midpoint deviation is 0 everywhere, so no extra subdivision
+  const resLinear = sampleFunction('2*x + 1', {
+    xMin: 0,
+    xMax: 10,
+    sampleCount: 3,
+    adaptive: { enabled: true, tolerance: 0.01 },
+  });
+  assert(resLinear.segments.length === 1, 'Linear function produces 1 continuous segment');
+  assert(resLinear.validPointsCount === 3, 'Linear function requires no extra subdivision (validPoints=3)');
+  verifyPointSanity(resLinear.segments, 'adaptive y = 2*x + 1');
+
+  // Parabola y = x^2: Requires adaptive subdivision where curved
+  const resParabola = sampleFunction('x^2', {
+    xMin: -2,
+    xMax: 2,
+    sampleCount: 5,
+    adaptive: { enabled: true, tolerance: 0.01, maxDepth: 4 },
+  });
+  assert(resParabola.segments.length === 1, 'y = x^2 produces 1 continuous segment');
+  assert(resParabola.validPointsCount > 5, 'y = x^2 subdivides curved intervals (points > 5)');
+  
+  // Verify strict monotonic ordering of x coordinates
+  const pts = resParabola.segments[0];
+  for (let i = 0; i < pts.length - 1; i++) {
+    assert(pts[i].x < pts[i + 1].x, `Points must be strictly ordered by x: ${pts[i].x} < ${pts[i + 1].x}`);
+  }
+  verifyPointSanity(resParabola.segments, 'adaptive y = x^2');
+
+  // Tolerance sensitivity test: tighter tolerance produces more points
+  const resCoarse = sampleFunction('sin(x)', {
+    xMin: 0,
+    xMax: Math.PI,
+    sampleCount: 3,
+    adaptive: { enabled: true, tolerance: 0.1 },
+  });
+  const resFine = sampleFunction('sin(x)', {
+    xMin: 0,
+    xMax: Math.PI,
+    sampleCount: 3,
+    adaptive: { enabled: true, tolerance: 0.005 },
+  });
+  assert(resFine.validPointsCount > resCoarse.validPointsCount, 'Tighter tolerance produces more points');
+}
+
+// 10. Screen-Space Adaptive Sampling
+console.log('Test Suite 10: Screen-Space Perpendicular Deviation');
+{
+  const resScreen = sampleFunction('sin(x)', {
+    xMin: 0,
+    xMax: 2 * Math.PI,
+    yMin: -1.5,
+    yMax: 1.5,
+    viewport: { width: 800, height: 600 },
+    sampleCount: 10,
+    adaptive: { enabled: true, tolerance: 0.5, maxDepth: 5 },
+  });
+
+  assert(resScreen.segments.length === 1, 'Screen-space adaptive sin(x) produces 1 segment');
+  assert(resScreen.validPointsCount > 10, 'Screen-space adaptive sampling refines curve in pixels');
+  verifyPointSanity(resScreen.segments, 'screen-space sin(x)');
+}
+
+// 11. Discontinuity & Vertical Asymptote Detection
+console.log('Test Suite 11: Discontinuity & Vertical Asymptote Detection (1/x, tan(x), 1/(x^2-1))');
+{
+  // y = 1/x with even sampleCount=200 (x=0 is NOT an exact sample point)
+  const resInvEven = sampleFunction('1/x', {
+    xMin: -2,
+    xMax: 2,
+    sampleCount: 200,
+    yMin: -10,
+    yMax: 10,
+  });
+  assert(resInvEven.segments.length === 2, 'y = 1/x with even sampleCount splits into 2 segments across 0');
+  const negSeg = resInvEven.segments[0];
+  const posSeg = resInvEven.segments[1];
+  assert(negSeg.every((p) => p.x < 0 && p.y < 0), 'Negative branch points are strictly negative');
+  assert(posSeg.every((p) => p.x > 0 && p.y > 0), 'Positive branch points are strictly positive');
+  assert(negSeg[negSeg.length - 1].x < posSeg[0].x, 'Segments do not overlap or connect');
+  verifyPointSanity(resInvEven.segments, 'uniform 1/x even sampleCount');
+
+  // y = 1/x with adaptive sampling enabled
+  const resInvAdaptive = sampleFunction('1/x', {
+    xMin: -2,
+    xMax: 2,
+    sampleCount: 20,
+    yMin: -20,
+    yMax: 20,
+    adaptive: { enabled: true, maxDepth: 5, tolerance: 0.05 },
+  });
+  assert(resInvAdaptive.segments.length === 2, 'Adaptive 1/x splits cleanly into 2 segments across 0');
+  verifyPointSanity(resInvAdaptive.segments, 'adaptive 1/x');
+
+  // y = tan(x) on [0, pi] (asymptote at pi/2 ~ 1.5707963)
+  const resTan = sampleFunction('tan(x)', {
+    xMin: 0,
+    xMax: Math.PI,
+    yMin: -20,
+    yMax: 20,
+    sampleCount: 50,
+    adaptive: { enabled: true, maxDepth: 5, tolerance: 0.1 },
+  });
+  assert(resTan.segments.length === 2, 'tan(x) on [0, pi] splits into exactly 2 segments across pi/2');
+  const tanLeft = resTan.segments[0];
+  const tanRight = resTan.segments[1];
+  assert(tanLeft.every((p) => p.x < Math.PI / 2), 'Left tan branch strictly before pi/2');
+  assert(tanRight.every((p) => p.x > Math.PI / 2), 'Right tan branch strictly after pi/2');
+  // Left branch ends climbing towards positive values, right branch starts from negative values
+  assert(tanLeft[tanLeft.length - 1].y > 0, 'tan left branch ends with positive y');
+  assert(tanRight[0].y < 0, 'tan right branch starts with negative y');
+  verifyPointSanity(resTan.segments, 'tan(x)');
+
+  // y = 1/(x^2 - 1) on [-2, 2] (singularities at x = -1 and x = 1)
+  const resPoles = sampleFunction('1/(x^2 - 1)', {
+    xMin: -2,
+    xMax: 2,
+    yMin: -15,
+    yMax: 15,
+    sampleCount: 60,
+    adaptive: { enabled: true, maxDepth: 5 },
+  });
+  assert(resPoles.segments.length === 3, '1/(x^2 - 1) splits into 3 distinct continuous segments');
+  assert(resPoles.segments[0].every((p) => p.x < -1), 'Branch 1 strictly x < -1');
+  assert(resPoles.segments[1].every((p) => p.x > -1 && p.x < 1), 'Branch 2 strictly -1 < x < 1');
+  assert(resPoles.segments[2].every((p) => p.x > 1), 'Branch 3 strictly x > 1');
+  verifyPointSanity(resPoles.segments, '1/(x^2 - 1)');
+
+  // y = log(x) on [-2, 5]
+  const resLog = sampleFunction('log(x)', {
+    xMin: -2,
+    xMax: 5,
+    sampleCount: 30,
+    adaptive: { enabled: true },
+  });
+  assert(resLog.segments.length === 1, 'log(x) produces 1 segment on the valid right branch');
+  assert(resLog.segments[0].every((p) => p.x > 0), 'All points of log(x) have x > 0');
+  verifyPointSanity(resLog.segments, 'adaptive log(x)');
+}
+
+// 12. Steep Continuous Functions (No False Positives)
+console.log('Test Suite 12: Steep Continuous Functions (Zero False Positives)');
+{
+  // Very steep linear function y = 1000*x: Should NOT be treated as a discontinuity!
+  const resSteepLinear = sampleFunction('1000*x', {
+    xMin: -2,
+    xMax: 2,
+    sampleCount: 40,
+    yMin: -2000,
+    yMax: 2000,
+  });
+  assert(resSteepLinear.segments.length === 1, 'y = 1000*x must NOT be falsely split into multiple segments');
+  assertClose(resSteepLinear.segments[0][0].y, -2000, 1e-6, 'y(-2) = -2000');
+  assertClose(resSteepLinear.segments[0][resSteepLinear.segments[0].length - 1].y, 2000, 1e-6, 'y(2) = 2000');
+  verifyPointSanity(resSteepLinear.segments, 'y = 1000*x');
+
+  // High-order polynomial y = x^5 on [-3, 3]
+  const resX5 = sampleFunction('x^5', {
+    xMin: -3,
+    xMax: 3,
+    sampleCount: 30,
+    adaptive: { enabled: true },
+  });
+  assert(resX5.segments.length === 1, 'y = x^5 remains 1 continuous segment');
+  verifyPointSanity(resX5.segments, 'y = x^5');
+}
+
+// 13. Direct detectDiscontinuity API Unit Tests
+console.log('Test Suite 13: Direct detectDiscontinuity API Tests');
+{
+  const compiledInv = compileExpression('1/x');
+  const evalInv = (xVal: number) => compiledInv.evaluate({ x: xVal });
+
+  // 1/x across x=0
+  const discInv = detectDiscontinuity(
+    { x: -0.01, y: -100 },
+    { x: 0.01, y: 100 },
+    evalInv,
+    { xMin: -2, xMax: 2, yMin: -20, yMax: 20 }
+  );
+  assert(discInv.isDiscontinuous, 'detectDiscontinuity identifies asymptote on 1/x across 0');
+
+  // tan(x) across pi/2
+  const compiledTan = compileExpression('tan(x)');
+  const discTan = detectDiscontinuity(
+    { x: 1.55, y: 48.08 },
+    { x: 1.59, y: -52.07 },
+    (xVal) => compiledTan.evaluate({ x: xVal }),
+    { xMin: 0, xMax: Math.PI, yMin: -20, yMax: 20 }
+  );
+  assert(discTan.isDiscontinuous, 'detectDiscontinuity identifies asymptote on tan(x) across pi/2');
+
+  // Smooth line y = 1000*x across 0
+  const compiledSteep = compileExpression('1000*x');
+  const discSteep = detectDiscontinuity(
+    { x: -0.01, y: -10 },
+    { x: 0.01, y: 10 },
+    (xVal) => compiledSteep.evaluate({ x: xVal }),
+    { xMin: -1, xMax: 1, yMin: -1000, yMax: 1000 }
+  );
+  assert(!discSteep.isDiscontinuous, 'detectDiscontinuity correctly returns false for steep continuous line');
+}
+
+// 14. Resource Limits & Stopping Conditions
+console.log('Test Suite 14: Resource Limits (maxDepth, maxPoints, minIntervalWidth, maxEvaluations)');
+{
+  // maxDepth: 1
+  const resDepth = sampleFunction('x^3', {
+    xMin: -2,
+    xMax: 2,
+    sampleCount: 3,
+    adaptive: { enabled: true, maxDepth: 1, tolerance: 1e-6 },
+  });
+  // 3 initial points -> 2 intervals -> each subdivided at most once -> at most 2 midpoints -> <= 5 points
+  assert(resDepth.validPointsCount <= 5, 'maxDepth=1 strictly limits subdivision depth');
+
+  // maxPoints limit
+  const resMaxPts = sampleFunction('sin(10*x)', {
+    xMin: 0,
+    xMax: 10,
+    sampleCount: 5,
+    adaptive: { enabled: true, maxPoints: 25, tolerance: 1e-5 },
+  });
+  assert(resMaxPts.validPointsCount <= 25, 'maxPoints strictly limits total points generated');
+
+  // maxEvaluations budget
+  const resBudgetAdaptive = sampleFunction('sin(20*x)', {
+    xMin: 0,
+    xMax: 10,
+    sampleCount: 10,
+    maxEvaluations: 30,
+    adaptive: { enabled: true, tolerance: 1e-6 },
+  });
+  assert(resBudgetAdaptive.budgetExhausted, 'Budget exhaustion is correctly flagged');
+  assert(resBudgetAdaptive.evaluationsCount <= 30, 'evaluationsCount strictly respects maxEvaluations');
+  assert(resBudgetAdaptive.warnings.some((w) => w.includes('exhausted')), 'Warning records budget exhaustion');
+}
+
+// 15. Input Validation for Adaptive Options
+console.log('Test Suite 15: Input Validation for Adaptive Settings');
+{
+  // Negative maxDepth
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, adaptive: { maxDepth: -1 } }),
+    'Negative maxDepth throws'
+  );
+
+  // Non-positive tolerance
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, adaptive: { tolerance: 0 } }),
+    'Zero tolerance throws'
+  );
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, adaptive: { tolerance: -0.5 } }),
+    'Negative tolerance throws'
+  );
+
+  // Non-positive minIntervalWidth
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, adaptive: { minIntervalWidth: -1e-5 } }),
+    'Negative minIntervalWidth throws'
+  );
+
+  // Invalid maxPoints (< 2)
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, adaptive: { maxPoints: 1 } }),
+    'maxPoints < 2 throws'
+  );
+
+  // Invalid viewport dimensions
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, viewport: { width: -100, height: 600 } }),
+    'Negative viewport width throws'
+  );
+  assertThrowsValidation(
+    () => sampleFunction('x', { xMin: 0, xMax: 1, viewport: { width: 800, height: 0 } }),
+    'Zero viewport height throws'
+  );
 }
 
 console.log(`\n=================================================`);
